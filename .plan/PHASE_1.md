@@ -1,8 +1,8 @@
 # Phase 1: Foundation & Infrastructure
 
-## Infrastructure Setup (Docker Compose)
+## Infrastructure Setup (Docker Compose + Makefile)
 
-Use Docker Compose for containerized development and deployment. Reference: `dianalu.design` docker-compose.yml structure.
+Use Docker Compose for containerized development. Reference: clever-stack-monolith structure (PayloadCMS on bun, Apache Tika integration).
 
 ### Services
 
@@ -12,184 +12,333 @@ Use Docker Compose for containerized development and deployment. Reference: `dia
   - WebSocket support enabled
   - DEFAULT_HOST: local.devhost.name
 
+- **PayloadCMS**: Payload on bun with hot module reload
+  - Image: oven/bun:1.3-debian
+  - Port: 3000 (HMR on 38935)
+  - Database: PostgreSQL
+  - Admin UI at `/admin`
+  - Collections for: Documents, DocumentChunks, DocumentMetadata
+  - Built-in CRUD APIs (REST + GraphQL)
+
 - **PostgreSQL 17**: Core database
   - Volume: `./.docker/postgres/data`
-  - Credentials: configurable via environment
-  - Extensions needed: pgvector, pgEdge Vectorizer
+  - Extensions: pgvector, pgEdge Vectorizer
+  - Password: configurable via .env
+  - DB: `openclaw_rag`
 
-- **Elasticsearch**: Full-text search engine
+- **Elasticsearch**: Full-text search
   - Volume: `./.docker/elasticsearch/data`
-  - Exposed for queries from app and agent
+  - Ports: 9200
+  - Used for document/metadata search
 
-- **pgEdge Vectorizer Worker**: Background service
+- **Apache Tika**: Document format extraction
+  - Image: apache/tika:2.9.2.1-full
+  - Port: 9998
+  - Converts Word, PDF, XLSX, etc. to plaintext
+  - Fallback for unsupported formats
+
+- **pgEdge Vectorizer Worker**: Background embedding service
   - Stateless worker pulling jobs from PostgreSQL queue
-  - Embedding provider: configurable (OpenAI, Ollama, etc.)
+  - Embedding provider: configurable (OpenAI, Ollama, local models)
+  - Automatic retry + rate limiting built-in
 
-- **Adminer**: Database browser (optional dev tool)
+- **Adminer**: Database browser
   - Port: 9093 at `/adminer`
-
-- **OpenClaw Agent Container** (future): Run OpenClaw integration
-  - MCP servers for ingestion, querying, management
-  - Connected to PostgreSQL + Elasticsearch
+  - Quick DB inspection during development
 
 ### Local Development Setup
 
-- Use `https://github.com/simplyhexagonal/local-dev-host-certs` for HTTPS on `local.devhost.name`
-- Generate certs, place in `./certs` directory
-- nginx-proxy automatically picks them up
-- All services communicate internally via docker network
+1. **Get certificates:**
+   ```bash
+   make get-certs-local-dev
+   ```
+   - Downloads `local-dev-host-certs` from GitHub
+   - Sets up HTTPS on `local.devhost.name`
 
-## Database Schema
+2. **Initialize environment:**
+   ```bash
+   make init
+   ```
+   - Installs dependencies (cms, app)
+   - Gets environment variables
+   - Downloads certs
 
-### Core Tables
+3. **Run development environment:**
+   ```bash
+   make local-dev
+   ```
+   - Starts all services
+   - PayloadCMS available at `https://local.devhost.name/admin`
+   - Tika at `https://local.devhost.name/tika`
+   - Elasticsearch at `https://local.devhost.name/elasticsearch`
 
-```sql
--- Documents table
-CREATE TABLE documents (
-  id UUID PRIMARY KEY,
-  filename TEXT NOT NULL,
-  source TEXT,
-  hash VARCHAR(64) UNIQUE NOT NULL,
-  uploaded_at TIMESTAMP DEFAULT NOW(),
-  category TEXT,
-  status TEXT DEFAULT 'pending', -- pending, indexing, vectorizing, complete, failed
-  metadata JSONB,
-  created_by TEXT,
-  updated_at TIMESTAMP DEFAULT NOW()
-);
+## PayloadCMS Collections
 
--- Document chunks (vectorized)
-CREATE TABLE document_chunks (
-  id UUID PRIMARY KEY,
-  doc_id UUID REFERENCES documents(id) ON DELETE CASCADE,
-  chunk_index INTEGER,
-  text TEXT NOT NULL,
-  embedding vector(1536), -- dimension depends on model
-  metadata JSONB,
-  created_at TIMESTAMP DEFAULT NOW()
-);
+Instead of raw SQL, define schema as TypeScript collections:
 
--- Document metadata for Elasticsearch sync
-CREATE TABLE document_metadata (
-  doc_id UUID PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
-  title TEXT,
-  description TEXT,
-  tags TEXT[],
-  category TEXT,
-  keywords TEXT[],
-  updated_at TIMESTAMP DEFAULT NOW()
-);
+### Documents Collection
 
--- Vectorizer queue (managed by pgEdge)
--- pgEdge creates this automatically
+```typescript
+// src/collections/Documents.ts
+export const Documents: CollectionConfig = {
+  slug: 'documents',
+  admin: {
+    useAsTitle: 'filename',
+  },
+  fields: [
+    {
+      name: 'filename',
+      type: 'text',
+      required: true,
+    },
+    {
+      name: 'hash',
+      type: 'text',
+      unique: true,
+      required: true,
+    },
+    {
+      name: 'source',
+      type: 'text',
+    },
+    {
+      name: 'category',
+      type: 'select',
+      options: [
+        { label: 'Projects', value: 'projects' },
+        { label: 'Personal', value: 'personal' },
+        { label: 'Reference', value: 'reference' },
+      ],
+    },
+    {
+      name: 'tags',
+      type: 'array',
+      fields: [
+        {
+          name: 'tag',
+          type: 'text',
+        },
+      ],
+    },
+    {
+      name: 'status',
+      type: 'select',
+      defaultValue: 'pending',
+      options: [
+        { label: 'Pending', value: 'pending' },
+        { label: 'Indexing', value: 'indexing' },
+        { label: 'Vectorizing', value: 'vectorizing' },
+        { label: 'Complete', value: 'complete' },
+        { label: 'Failed', value: 'failed' },
+      ],
+      admin: { readOnly: true },
+    },
+    {
+      name: 'metadata',
+      type: 'json',
+    },
+  ],
+  hooks: {
+    beforeCreate: [({ data }) => {
+      // Hash validation
+      if (!data.hash) {
+        throw new Error('Hash required for deduplication');
+      }
+    }],
+    afterCreate: [({ doc }) => {
+      // Trigger vectorization
+      // pgEdge worker picks up automatically
+    }],
+  },
+};
 ```
 
-## pgEdge Vectorizer Setup
+### DocumentChunks Collection
 
-### Configuration
+```typescript
+export const DocumentChunks: CollectionConfig = {
+  slug: 'document-chunks',
+  fields: [
+    {
+      name: 'document',
+      type: 'relationship',
+      relationTo: 'documents',
+      required: true,
+    },
+    {
+      name: 'chunkIndex',
+      type: 'number',
+      required: true,
+    },
+    {
+      name: 'text',
+      type: 'textarea',
+      required: true,
+    },
+    {
+      name: 'embedding',
+      type: 'json', // Store pgvector embeddings
+    },
+    {
+      name: 'metadata',
+      type: 'json',
+    },
+  ],
+  admin: {
+    defaultColumns: ['document', 'chunkIndex', 'text'],
+  },
+};
+```
 
-- Declare vectorizer in PostgreSQL for `documents` table
-- Load from: `metadata.content` column or external file references
-- Parse with: pgEdge Document Loader (HTML, Markdown, RST, SGML)
-- Chunk using: pgEdge chunking config
-- Embed using: Configured provider (OpenAI, Ollama, etc.)
-- Destination: `document_chunks` table
+### DocumentMetadata Collection
 
-### Example SQL
+```typescript
+export const DocumentMetadata: CollectionConfig = {
+  slug: 'document-metadata',
+  fields: [
+    {
+      name: 'document',
+      type: 'relationship',
+      relationTo: 'documents',
+      required: true,
+      unique: true,
+    },
+    {
+      name: 'title',
+      type: 'text',
+    },
+    {
+      name: 'description',
+      type: 'textarea',
+    },
+    {
+      name: 'keywords',
+      type: 'array',
+      fields: [{ name: 'keyword', type: 'text' }],
+    },
+  ],
+};
+```
+
+## Makefile Targets
+
+Key commands for developer experience:
+
+```bash
+make init              # One-shot: get certs, env, install deps
+make get-certs-local-dev
+make local-dev        # Start all services (foreground)
+make local-dev-daemon # Start all services (background)
+make local-dev-stop   # Stop containers
+make logs-cms         # View PayloadCMS logs
+make logs-all         # View all logs
+make cms-migrate      # Run database migrations
+make cms-cli          # Access PayloadCMS container shell
+make local-reset-db   # Wipe PostgreSQL and start fresh
+make seed-documents   # Load sample documents
+```
+
+## Vectorizer Configuration
+
+Place in PayloadCMS hooks or migration script:
 
 ```sql
+-- Runs on first startup
 SELECT ai.create_vectorizer(
   'documents'::regclass,
   if_not_exists => true,
   loading => ai.loading_column(column_name=>'text'),
   destination => ai.destination_table(target_table=>'document_chunks'),
-  embedding => ai.embedding_openai(model=>'text-embedding-3-small', dimensions=>'1536')
-)
+  embedding => ai.embedding_openai(model=>'text-embedding-3-small', dimensions=>'1536'),
+  chunking => ai.chunking_recursive_character(chunk_size=>512, chunk_overlap=>50)
+);
 ```
 
-## Elasticsearch Integration
+## Document Ingestion Flow
 
-### Index Mapping
-
-```json
-{
-  "mappings": {
-    "properties": {
-      "doc_id": { "type": "keyword" },
-      "filename": { "type": "text", "analyzer": "standard" },
-      "title": { "type": "text", "analyzer": "standard" },
-      "description": { "type": "text" },
-      "content": { "type": "text", "analyzer": "standard" },
-      "category": { "type": "keyword" },
-      "tags": { "type": "keyword" },
-      "uploaded_at": { "type": "date" },
-      "source": { "type": "keyword" }
-    }
-  }
-}
-```
-
-### Sync Strategy
-
-- PostgreSQL trigger on document insert/update
-- Post to Elasticsearch bulk API
-- Handle failures gracefully
-
-## MCP Server 1: Document Ingestion
-
-### Endpoint: `ingest_document`
-
-**Input:**
-- `file_path`: Local or remote file path
-- `category`: Document category (for filtering/organization)
-- `tags`: Array of tags
-- `format`: Optional explicit format hint
-
-**Process:**
-
-1. Hash file content (MD5/SHA256)
-2. Check if hash exists in `documents` table
-   - If yes: return existing doc_id, skip processing
-   - If no: proceed
-3. Load file using Apache Tika (if unsupported format) or pgEdge Document Loader
-4. Insert into `documents` table with status='pending'
-5. Create entry in `document_metadata`
-6. Index in Elasticsearch
-7. Set status='vectorizing' (pgEdge worker picks up automatically)
-8. Return: `{doc_id, chunks_created, status}`
-
-**Error Handling:**
-- Duplicate hash detection (prevents bloat)
-- Format conversion failures → fallback to Tika
-- ES indexing failures → retry queue
-- Vectorization failures → marked as 'failed', can retry
+1. **API/MCP call:** `POST /api/documents` with file
+2. **Payload beforeCreate hook:**
+   - Compute file hash
+   - Check for duplicates in DB
+   - If hash exists: return existing doc_id (skip processing)
+   - If new: proceed
+3. **Document created in DB**
+4. **afterCreate hook:**
+   - Call Apache Tika for format conversion (if needed)
+   - Extract plaintext
+   - Trigger pgEdge vectorizer (status='vectorizing')
+   - Queue Elasticsearch indexing
+5. **pgEdge worker:** Auto-chunks, embeds, stores in document_chunks
+6. **Elasticsearch sync:** Document + metadata indexed for full-text search
+7. **Status updated:** Complete or failed
 
 ## Environment Configuration
 
-Create `.env` file:
+Create `.env` file (git-ignored):
 
 ```env
+# Database
 POSTGRES_USER=pglocaldev
-POSTGRES_PASSWORD=<secure-password>
+POSTGRES_PASSWORD=secure_password_here
 POSTGRES_DB=openclaw_rag
 
+# Elasticsearch
 ELASTICSEARCH_HOST=elasticsearch:9200
 
-OPENAI_API_KEY=<your-key>
-# OR for local embeddings:
+# Embeddings
+OPENAI_API_KEY=sk-...
+# OR local:
 # OLLAMA_HOST=http://ollama:11434
 # OLLAMA_MODEL=nomic-embed-text
 
+# Payload CMS
+PAYLOAD_SECRET=very_secret_key_here
+
+# Vector settings
 VECTOR_DIMENSION=1536
 EMBEDDING_MODEL=text-embedding-3-small
+CHUNK_SIZE=512
+CHUNK_OVERLAP=50
+```
+
+## Directory Structure
+
+```
+.
+├── .plan/                    # Phase documentation
+├── docker-compose.yml        # Services definition
+├── Makefile                  # Dev commands
+├── .env.example              # Template env file
+├── cms/                      # PayloadCMS application
+│   ├── src/
+│   │   ├── collections/
+│   │   │   ├── Documents.ts
+│   │   │   ├── DocumentChunks.ts
+│   │   │   └── DocumentMetadata.ts
+│   │   ├── endpoints/        # Custom REST endpoints
+│   │   ├── hooks/            # Payload hooks
+│   │   └── payload.config.ts
+│   ├── package.json
+│   └── Dockerfile
+├── vectorizer-worker/        # pgEdge background worker
+│   ├── src/
+│   └── package.json
+├── .docker/
+│   └── postgres/data/        # PostgreSQL data volume
+└── certs/                    # SSL certificates (from local-dev-host-certs)
 ```
 
 ## Next Steps
 
 Phase 1 is complete when:
-- [ ] Docker Compose setup runs all services
-- [ ] PostgreSQL migrations applied
-- [ ] pgEdge Vectorizer configured and worker running
-- [ ] Elasticsearch initialized and schema mapped
-- [ ] Document Ingestion MCP server callable and tested
-- [ ] Hash dedup prevents duplicate ingestion
+- [ ] `make init` runs without errors
+- [ ] `make local-dev` starts all services
+- [ ] PayloadCMS admin UI accessible at `/admin`
+- [ ] Collections created with proper relationships
+- [ ] PostgreSQL pgvector extension installed
+- [ ] pgEdge Vectorizer configured and running
+- [ ] Apache Tika accessible for format conversion
+- [ ] Elasticsearch initialized and available
+- [ ] Sample document ingestion works end-to-end
+- [ ] Hash dedup prevents re-ingestion
+- [ ] Document status updates through workflow
