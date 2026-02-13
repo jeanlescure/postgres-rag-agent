@@ -1,6 +1,8 @@
 # Phase 2: Knowledge Retrieval & Agentic Layer
 
-## MCP Server 2: Knowledge Query
+This phase builds the actual agentic systems: MCP servers that handle semantic search, full-text search, and document management. These are what integrate with OpenClaw and enable the agent to query your knowledge base.
+
+## MCP Server: Knowledge Query
 
 ### Endpoint: `semantic_search`
 
@@ -82,7 +84,7 @@ LIMIT limit
 5. Sort by combined score
 6. Return top `limit`
 
-## MCP Server 3: Document Management
+## MCP Server: Document Management
 
 ### Endpoint: `list_documents`
 

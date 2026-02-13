@@ -37,10 +37,12 @@ Use Docker Compose for containerized development. Reference: clever-stack-monoli
   - Converts Word, PDF, XLSX, etc. to plaintext
   - Fallback for unsupported formats
 
-- **pgEdge Vectorizer Worker**: Background embedding service
-  - Stateless worker pulling jobs from PostgreSQL queue
-  - Embedding provider: configurable (OpenAI, Ollama, local models)
-  - Automatic retry + rate limiting built-in
+- **pgEdge Vectorizer Extension**: PostgreSQL extension for automatic text chunking and vector embedding
+  - Installed as a PostgreSQL extension, not a separate service
+  - Background workers built into PostgreSQL process itself
+  - Triggers on INSERT/UPDATE to configured columns
+  - Supports OpenAI, Voyage AI, and Ollama embedding providers
+  - Automatic retry and rate limiting built-in
 
 - **Adminer**: Database browser
   - Port: 9093 at `/adminer`
@@ -238,21 +240,26 @@ make local-reset-db   # Wipe PostgreSQL and start fresh
 make seed-documents   # Load sample documents
 ```
 
-## Vectorizer Configuration
+## pgEdge Vectorizer Extension Setup
 
-Place in PayloadCMS hooks or migration script:
+Install and configure the pgEdge Vectorizer extension in PostgreSQL:
 
 ```sql
--- Runs on first startup
-SELECT ai.create_vectorizer(
-  'documents'::regclass,
-  if_not_exists => true,
-  loading => ai.loading_column(column_name=>'text'),
-  destination => ai.destination_table(target_table=>'document_chunks'),
-  embedding => ai.embedding_openai(model=>'text-embedding-3-small', dimensions=>'1536'),
-  chunking => ai.chunking_recursive_character(chunk_size=>512, chunk_overlap=>50)
+-- Create extensions
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgedge_vectorizer;
+
+-- Configure vectorization on the documents table
+SELECT pgedge_vectorizer.enable_vectorization(
+  source_table := 'documents',
+  source_column := 'text',
+  chunk_strategy := 'token_based',
+  chunk_size := 512,
+  chunk_overlap := 50
 );
 ```
+
+The pgEdge Vectorizer extension automatically creates a chunks table (e.g., documents_text_chunks) with columns for chunk text and embeddings. Background workers process the queue asynchronously and call your configured embedding provider (OpenAI, Voyage, or Ollama).
 
 ## Document Ingestion Flow
 
@@ -320,9 +327,6 @@ CHUNK_OVERLAP=50
 │   │   └── payload.config.ts
 │   ├── package.json
 │   └── Dockerfile
-├── vectorizer-worker/        # pgEdge background worker
-│   ├── src/
-│   └── package.json
 ├── .docker/
 │   └── postgres/data/        # PostgreSQL data volume
 └── certs/                    # SSL certificates (from local-dev-host-certs)
