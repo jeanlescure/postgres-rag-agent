@@ -49,6 +49,7 @@ coverage/
 temp/
 
 # Docker
+.docker/
 .dockerignore
 docker-compose.override.yml
 
