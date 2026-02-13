@@ -19,9 +19,8 @@ get-env-local-dev: ## Create local dev .env file from .env.example
 		echo "✅ .env already exists" ; \
 	fi
 
-install-dependencies: ## Install dependencies for cms and vectorizer-worker
+install-dependencies: ## Install dependencies for cms
 	cd cms && bun install
-	cd vectorizer-worker && bun install
 
 init: ## Initialize project (certs, env, dependencies)
 	make get-certs-local-dev
@@ -51,9 +50,6 @@ local-dev-logs: ## Show logs for running services
 restart-cms: ## Restart PayloadCMS container
 	docker compose restart cms
 
-restart-vectorizer: ## Restart vectorizer-worker container
-	docker compose restart vectorizer-worker
-
 restart-postgres: ## Restart PostgreSQL container
 	docker compose restart postgres
 
@@ -68,9 +64,6 @@ stop-cms: ## Stop PayloadCMS container
 
 logs-cms: ## Show PayloadCMS logs
 	docker compose logs -f cms
-
-logs-vectorizer: ## Show vectorizer-worker logs
-	docker compose logs -f vectorizer-worker
 
 logs-postgres: ## Show PostgreSQL logs
 	docker compose logs -f postgres
@@ -87,9 +80,6 @@ cms-cli: ## Open bash in PayloadCMS container
 cms-migrate: ## Run PayloadCMS database migrations
 	docker compose exec -it cms bun run payload migrate
 
-vectorizer-cli: ## Open bash in vectorizer-worker container
-	docker compose exec -it vectorizer-worker bash
-
 local-reset-db: ## Reset PostgreSQL database (deletes all data)
 	@echo "⚠️  Resetting PostgreSQL database..."
 	docker compose stop postgres
@@ -97,10 +87,6 @@ local-reset-db: ## Reset PostgreSQL database (deletes all data)
 	docker compose up -d postgres
 	@echo "✅ Database reset. Waiting for PostgreSQL to be ready..."
 	sleep 5
-
-seed-documents: ## Load sample documents into the database
-	@echo "📥 Seeding sample documents..."
-	docker compose exec -it vectorizer-worker bun run scripts/seed-documents.ts
 
 health: ## Check health of all services
 	@echo "🏥 Checking service health..."
@@ -115,31 +101,19 @@ lint-cms: ## Lint PayloadCMS code
 lint-cms-fix: ## Fix lint issues in PayloadCMS
 	bunx --yes @biomejs/biome check --write cms/src
 
-lint-vectorizer: ## Lint vectorizer-worker code
-	bunx --yes @biomejs/biome check vectorizer-worker/src
+lint-all: lint-cms ## Lint all code
 
-lint-vectorizer-fix: ## Fix lint issues in vectorizer-worker
-	bunx --yes @biomejs/biome check --write vectorizer-worker/src
-
-lint-all: lint-cms lint-vectorizer ## Lint all code
-
-lint-all-fix: lint-cms-fix lint-vectorizer-fix ## Fix all lint issues
+lint-all-fix: lint-cms-fix ## Fix all lint issues
 
 build-cms: ## Build PayloadCMS
 	cd cms && bun run build
 
-build-vectorizer: ## Build vectorizer-worker
-	cd vectorizer-worker && bun run build
-
-build-all: build-cms build-vectorizer ## Build all services
+build-all: build-cms ## Build all services
 
 test-cms: ## Run PayloadCMS tests
 	cd cms && bun run test
 
-test-vectorizer: ## Run vectorizer-worker tests
-	cd vectorizer-worker && bun run test
-
-test-all: test-cms test-vectorizer ## Run all tests
+test-all: test-cms ## Run all tests
 
 dev-setup: ## One-time development setup
 	@echo "🔧 Setting up development environment..."
