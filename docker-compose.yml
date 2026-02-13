@@ -58,7 +58,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      NODE_OPTIONS: --max-old-space-size=4096
+      NODE_OPTIONS: --no-deprecation
       VIRTUAL_HOST_MULTIPORTS: |-
         local.devhost.name:
           "/admin/hmr/":
@@ -68,6 +68,16 @@ services:
           "/_next":
             port: 3000
           "/api/":
+            port: 3000
+          "/graphql":
+            port: 3000
+          "/swagger":
+            port: 3000
+          "/redoc":
+            port: 3000
+          "/rapidoc":
+            port: 3000
+          "/health":
             port: 3000
     env_file:
       - .env
